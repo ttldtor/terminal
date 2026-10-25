@@ -33,6 +33,7 @@
     <ClInclude Include="BackendD3D.h" />
     <ClInclude Include="BuiltinGlyphs.h" />
     <ClInclude Include="common.h" />
+    <ClInclude Include="GlyphCellFit.h" />
     <ClInclude Include="dwrite_helpers.h" />
     <ClInclude Include="DWriteTextAnalysis.h" />
     <ClInclude Include="pch.h" />

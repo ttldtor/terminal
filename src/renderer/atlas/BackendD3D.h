@@ -12,6 +12,8 @@ namespace Microsoft::Console::Render::Atlas
 {
     struct BackendD3D : IBackend
     {
+        friend class AtlasEngineTests;
+
         BackendD3D(const RenderingPayload& p);
         ~BackendD3D() override;
 
@@ -119,7 +121,7 @@ namespace Microsoft::Console::Render::Atlas
                 return entry.occupied != 0;
             }
 
-            static constexpr size_t hash(const u16 glyphIndex) noexcept
+            static constexpr size_t hash(const u32 glyphIndex) noexcept
             {
                 return til::flat_set_hash_integer(glyphIndex);
             }
@@ -129,12 +131,12 @@ namespace Microsoft::Console::Render::Atlas
                 return til::flat_set_hash_integer(entry.glyphIndex);
             }
 
-            static constexpr bool equals(const AtlasGlyphEntry& entry, u16 glyphIndex) noexcept
+            static constexpr bool equals(const AtlasGlyphEntry& entry, u32 glyphIndex) noexcept
             {
                 return entry.glyphIndex == glyphIndex;
             }
 
-            static constexpr void assign(AtlasGlyphEntry& entry, u16 glyphIndex) noexcept
+            static constexpr void assign(AtlasGlyphEntry& entry, u32 glyphIndex) noexcept
             {
                 entry.glyphIndex = glyphIndex;
                 entry.occupied = 1;

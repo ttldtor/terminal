@@ -30,6 +30,29 @@
 #pragma warning(disable : 26482) // Only index into arrays using constant expressions (bounds.2).
 
 using namespace Microsoft::Console::Render::Atlas;
+// Recognize only complete standard keycaps, not arbitrary combining sequences.
+// The returned length is in UTF-16 code units.
+static u32 keycapLength(std::wstring_view text) noexcept
+{
+    if (text.starts_with(L"\U0001F51F"))
+    {
+        return 2;
+    }
+    if (text.empty())
+    {
+        return 0;
+    }
+
+    const auto base = text.front();
+    const auto isKeycapBase = (base >= L'0' && base <= L'9') || base == L'#' || base == L'*';
+    if (!isKeycapBase || text.size() < 2)
+    {
+        return 0;
+    }
+
+    const size_t mark = text[1] == L'\uFE0F' ? 2 : 1;
+    return mark < text.size() && text[mark] == L'\u20E3' ? static_cast<u32>(mark + 1) : 0;
+}
 
 #pragma warning(suppress : 26455) // Default constructor may not throw. Declare it 'noexcept' (f.6).
 AtlasEngine::AtlasEngine()
@@ -885,7 +908,7 @@ void AtlasEngine::_mapRegularText(size_t offBeg, size_t offEnd)
     {
         u32 mappedLength = 0;
         wil::com_ptr<IDWriteFontFace2> mappedFontFace;
-        _mapCharacters(_api.bufferLine.data() + idx, gsl::narrow_cast<u32>(offEnd - idx), &mappedLength, mappedFontFace.addressof());
+        _mapCharactersForGrapheme(idx, gsl::narrow_cast<u32>(offEnd), &mappedLength, mappedFontFace.addressof());
         mappedEnd = idx + mappedLength;
 
         if (!mappedFontFace)
@@ -894,6 +917,10 @@ void AtlasEngine::_mapRegularText(size_t offBeg, size_t offEnd)
             continue;
         }
 
+        const auto mappedStart = idx;
+        const auto keycapTextLength = keycapLength({ _api.bufferLine.data() + idx, mappedLength });
+        const auto keycapCells = keycapTextLength == mappedLength ?
+            _api.bufferLineColumn[mappedEnd] - _api.bufferLineColumn[idx] : 0;
         const auto initialIndicesCount = row.glyphIndices.size();
 
         // GetTextComplexity() returns as many glyph indices as its textLength parameter (here: mappedLength).
@@ -946,13 +973,23 @@ void AtlasEngine::_mapRegularText(size_t offBeg, size_t offEnd)
         }
 
         const auto indicesCount = row.glyphIndices.size();
+        // Per-glyph fitting is valid only when shaping produced one glyph for the
+        // complete keycap. Multi-glyph sequences retain their original placement.
+        const auto fittedCells = keycapCells > 0 && keycapCells <= 2 &&
+            indicesCount == initialIndicesCount + 1 &&
+            (mappedStart == 0 || _api.bufferLineColumn[mappedStart - 1] != _api.bufferLineColumn[mappedStart]) ?
+            static_cast<u16>(keycapCells) : u16{ 0 };
+        if (fittedCells)
+        {
+            row.glyphOffsets[initialIndicesCount].advanceOffset = 0;
+        }
         if (indicesCount > initialIndicesCount)
         {
             // IDWriteFontFallback::MapCharacters() isn't just awfully slow,
             // it can also repeatedly return the same font face again and again. :)
-            if (row.mappings.empty() || row.mappings.back().fontFace != mappedFontFace)
+            if (fittedCells || row.mappings.empty() || row.mappings.back().fitToCells || row.mappings.back().fontFace != mappedFontFace)
             {
-                row.mappings.emplace_back(std::move(mappedFontFace), gsl::narrow_cast<u32>(initialIndicesCount), gsl::narrow_cast<u32>(indicesCount));
+                row.mappings.emplace_back(std::move(mappedFontFace), gsl::narrow_cast<u32>(initialIndicesCount), gsl::narrow_cast<u32>(indicesCount), fittedCells);
             }
             else
             {
@@ -984,7 +1021,7 @@ void AtlasEngine::_mapBuiltinGlyphs(size_t offBeg, size_t offEnd)
     row.mappings.emplace_back(nullptr, gsl::narrow_cast<u32>(initialIndicesCount), gsl::narrow_cast<u32>(row.glyphIndices.size()));
 }
 
-void AtlasEngine::_mapCharacters(const wchar_t* text, const u32 textLength, u32* mappedLength, IDWriteFontFace2** mappedFontFace) const
+void AtlasEngine::_mapCharacters(const wchar_t* text, const u32 textLength, u32* mappedLength, IDWriteFontFace2** mappedFontFace, const wchar_t* baseFamilyName) const
 {
     TextAnalysisSource analysisSource{ _p.userLocaleName.c_str(), text, textLength };
     const auto& textFormatAxis = _api.textFormatAxes[static_cast<size_t>(_api.attributes)];
@@ -1000,7 +1037,7 @@ void AtlasEngine::_mapCharacters(const wchar_t* text, const u32 textLength, u32*
             /* textPosition       */ 0,
             /* textLength         */ textLength,
             /* baseFontCollection */ _p.s->font->fontCollection.get(),
-            /* baseFamilyName     */ _p.s->font->fontName.c_str(),
+            /* baseFamilyName     */ baseFamilyName ? baseFamilyName : _p.s->font->fontName.c_str(),
             /* fontAxisValues     */ textFormatAxis.data(),
             /* fontAxisValueCount */ gsl::narrow_cast<u32>(textFormatAxis.size()),
             /* mappedLength       */ mappedLength,
@@ -1018,7 +1055,7 @@ void AtlasEngine::_mapCharacters(const wchar_t* text, const u32 textLength, u32*
             /* textPosition       */ 0,
             /* textLength         */ textLength,
             /* baseFontCollection */ _p.s->font->fontCollection.get(),
-            /* baseFamilyName     */ _p.s->font->fontName.c_str(),
+            /* baseFamilyName     */ baseFamilyName ? baseFamilyName : _p.s->font->fontName.c_str(),
             /* baseWeight         */ baseWeight,
             /* baseStyle          */ baseStyle,
             /* baseStretch        */ DWRITE_FONT_STRETCH_NORMAL,
@@ -1035,6 +1072,133 @@ void AtlasEngine::_mapCharacters(const wchar_t* text, const u32 textLength, u32*
     // Oh wow! You found a case where scale isn't 1! I tried every font and none
     // returned something besides 1. I just couldn't figure out why this exists.
     assert(scale == 1);
+}
+
+void AtlasEngine::_mapCharactersForGrapheme(u32 idx, u32 end, u32* mappedLength, IDWriteFontFace2** mappedFontFace) const
+{
+    _mapCharacters(_api.bufferLine.data() + idx, end - idx, mappedLength, mappedFontFace);
+    THROW_HR_IF(E_UNEXPECTED, !*mappedLength || *mappedLength > end - idx);
+    // Isolate keycaps from adjacent text before choosing a whole-cluster face or
+    // attaching cell fitting. Do not interpret a style-split fragment as a full keycap.
+    u32 isolatedKeycapLength = 0;
+    for (auto i = idx; i < idx + *mappedLength; ++i)
+    {
+        if (i && _api.bufferLineColumn[i - 1] == _api.bufferLineColumn[i])
+        {
+            continue;
+        }
+
+        const auto length = keycapLength({ _api.bufferLine.data() + i, end - i });
+        if (!length || _api.bufferLineColumn[i] != _api.bufferLineColumn[i + length - 1] ||
+            _api.bufferLineColumn[i + length] == _api.bufferLineColumn[i])
+        {
+            continue;
+        }
+        if (i > idx)
+        {
+            *mappedLength = i - idx;
+            return;
+        }
+
+        isolatedKeycapLength = length;
+        *mappedLength = std::min(*mappedLength, length);
+        break;
+    }
+
+    // Ordinary combining sequences keep upstream fallback and shaping unchanged.
+    // A whole-grapheme retry is intentionally limited to complete keycaps.
+    if (!isolatedKeycapLength)
+    {
+        return;
+    }
+
+    // Segoe UI Symbol covers '*' and the enclosing mark separately but does not
+    // necessarily compose them. Prefer the system emoji family when that fallback
+    // split occurs; keep the original path if the family cannot cover the sequence.
+    if (isolatedKeycapLength && _api.bufferLine[idx] == L'*' && *mappedLength < isolatedKeycapLength)
+    {
+        u32 emojiLength = 0;
+        wil::com_ptr<IDWriteFontFace2> emojiFace;
+        _mapCharacters(_api.bufferLine.data() + idx, isolatedKeycapLength, &emojiLength, emojiFace.addressof(), L"Segoe UI Emoji");
+        if (emojiFace && emojiLength == isolatedKeycapLength)
+        {
+            if (*mappedFontFace)
+            {
+                (*mappedFontFace)->Release();
+            }
+            *mappedFontFace = emojiFace.detach();
+            *mappedLength = emojiLength;
+            return;
+        }
+    }
+    const auto split = idx + *mappedLength;
+    if (split >= end || _api.bufferLineColumn[split - 1] != _api.bufferLineColumn[split])
+    {
+        return;
+    }
+
+    // Font fallback can split a terminal grapheme, for example a keycap's digit and enclosing mark.
+    // Keep the preceding text in its original face before retrying the entire grapheme.
+    auto clusterBegin = split;
+    while (clusterBegin > idx && _api.bufferLineColumn[clusterBegin - 1] == _api.bufferLineColumn[split])
+    {
+        --clusterBegin;
+    }
+    if (clusterBegin > idx)
+    {
+        *mappedLength = clusterBegin - idx;
+        return;
+    }
+
+    // If a preceding fragment could not use one face, retain its fallback path instead of
+    // rescanning the same cluster for each remaining fragment.
+    if (idx && _api.bufferLineColumn[idx - 1] == _api.bufferLineColumn[idx])
+    {
+        return;
+    }
+
+    auto clusterEnd = split;
+    while (clusterEnd < end && _api.bufferLineColumn[clusterEnd] == _api.bufferLineColumn[split])
+    {
+        ++clusterEnd;
+    }
+
+    u32 suffixLength = 0;
+    wil::com_ptr<IDWriteFontFace2> fallbackFace;
+    _mapCharacters(_api.bufferLine.data() + split, clusterEnd - split, &suffixLength, fallbackFace.addressof());
+    if (!fallbackFace || !suffixLength)
+    {
+        return;
+    }
+
+    // Only reuse that face if it covers every codepoint except joiners and variation selectors. Retain the
+    // original fallback path; a single font is not guaranteed to cover an arbitrary grapheme.
+    for (auto i = idx; i < clusterEnd;)
+    {
+        u32 codepoint = _api.bufferLine[i++];
+        if (til::is_leading_surrogate(codepoint) && i < clusterEnd && til::is_trailing_surrogate(_api.bufferLine[i]))
+        {
+            codepoint = til::combine_surrogates(codepoint, _api.bufferLine[i++]);
+        }
+        if (codepoint == 0x200D || (codepoint >= 0xFE00 && codepoint <= 0xFE0F) || (codepoint >= 0xE0100 && codepoint <= 0xE01EF))
+        {
+            continue;
+        }
+
+        u16 glyph = 0;
+        THROW_IF_FAILED(fallbackFace->GetGlyphIndicesW(&codepoint, 1, &glyph));
+        if (!glyph)
+        {
+            return;
+        }
+    }
+
+    *mappedLength = clusterEnd - idx;
+    if (*mappedFontFace)
+    {
+        (*mappedFontFace)->Release();
+    }
+    *mappedFontFace = fallbackFace.detach();
 }
 
 void AtlasEngine::_mapComplex(IDWriteFontFace2* mappedFontFace, u32 idx, u32 length, ShapedRow& row)

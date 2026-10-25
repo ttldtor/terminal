@@ -45,6 +45,8 @@ struct GraphemeState
     // _state is stored ~flipped, so that we can differentiate between it being unset (0) and it being set to 0 (~0 = 255).
     int _state = 0;
     int _last = 0;
+    // Retain the adjacent scalar across chunks to recognize unqualified keycaps.
+    char32_t _previousCodepoint = 0;
 };
 
 struct CodepointWidthDetector

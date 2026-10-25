@@ -1336,6 +1336,99 @@ class CodepointWidthDetectorTests
         }
     }
 
+    TEST_METHOD(KeycapWidths)
+    {
+        CodepointWidthDetector detector;
+        for (const auto mode : { TextMeasurementMode::Graphemes, TextMeasurementMode::Wcswidth })
+        {
+            detector.Reset(mode);
+            for (const auto base : std::wstring_view{ L"0123456789#*" })
+            {
+                for (const bool vs16 : { false, true })
+                {
+                    std::wstring text(1, base);
+                    if (vs16)
+                    {
+                        text += L'\uFE0F';
+                    }
+                    text += L'\u20E3';
+
+                    const auto expected = mode == TextMeasurementMode::Graphemes ? 2 : 1;
+                    for (size_t split = 0; split <= text.size(); ++split)
+                    {
+                        const std::array chunks{ std::wstring_view{ text }.substr(0, split), std::wstring_view{ text }.substr(split) };
+                        GraphemeState forward;
+                        GraphemeState backward;
+                        for (const auto chunk : chunks)
+                        {
+                            if (!chunk.empty())
+                            {
+                                VERIFY_IS_FALSE(detector.GraphemeNext(forward, chunk));
+                            }
+                        }
+                        for (auto it = chunks.rbegin(); it != chunks.rend(); ++it)
+                        {
+                            if (!it->empty())
+                            {
+                                VERIFY_IS_FALSE(detector.GraphemePrev(backward, *it));
+                            }
+                        }
+                        VERIFY_ARE_EQUAL(expected, forward.width);
+                        VERIFY_ARE_EQUAL(expected, backward.width);
+                    }
+
+                    // Separate allocations model independent PTY reads, including empty reads.
+                    std::vector<std::wstring> chunks;
+                    for (const auto ch : text)
+                    {
+                        chunks.emplace_back(1, ch);
+                        chunks.emplace_back();
+                    }
+                    GraphemeState streamedForward;
+                    GraphemeState streamedBackward;
+                    for (const auto& chunk : chunks)
+                    {
+                        VERIFY_IS_FALSE(detector.GraphemeNext(streamedForward, chunk));
+                    }
+                    for (auto it = chunks.rbegin(); it != chunks.rend(); ++it)
+                    {
+                        VERIFY_IS_FALSE(detector.GraphemePrev(streamedBackward, *it));
+                    }
+                    VERIFY_ARE_EQUAL(expected, streamedForward.width);
+                    VERIFY_ARE_EQUAL(expected, streamedBackward.width);
+
+                    const std::wstring surrounded = L"A" + text + L"B";
+                    GraphemeState state;
+                    VERIFY_IS_TRUE(detector.GraphemeNext(state, surrounded));
+                    VERIFY_ARE_EQUAL(1, state.width);
+                    VERIFY_IS_TRUE(detector.GraphemeNext(state, surrounded));
+                    VERIFY_ARE_EQUAL(expected, state.width);
+                    VERIFY_IS_FALSE(detector.GraphemeNext(state, surrounded));
+                    VERIFY_ARE_EQUAL(1, state.width);
+
+                    state = {};
+                    VERIFY_IS_TRUE(detector.GraphemePrev(state, surrounded));
+                    VERIFY_ARE_EQUAL(1, state.width);
+                    VERIFY_IS_TRUE(detector.GraphemePrev(state, surrounded));
+                    VERIFY_ARE_EQUAL(expected, state.width);
+                    VERIFY_IS_FALSE(detector.GraphemePrev(state, surrounded));
+                    VERIFY_ARE_EQUAL(1, state.width);
+                }
+            }
+        }
+
+        detector.Reset(TextMeasurementMode::Graphemes);
+        for (const auto text : { L"A\u20E3", L"0\u0301\u20E3", L"0\uFE0E\u20E3", L"\u20E3", L"0123456789#*" })
+        {
+            GraphemeState forward;
+            GraphemeState backward;
+            detector.GraphemeNext(forward, text);
+            detector.GraphemePrev(backward, text);
+            VERIFY_IS_TRUE(forward.width <= 1);
+            VERIFY_IS_TRUE(backward.width <= 1);
+        }
+    }
+
     TEST_METHOD(AmbiguousWidthPolicy)
     {
         const auto measureWidth = [](CodepointWidthDetector& cwd, const std::wstring_view text) {

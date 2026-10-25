@@ -12,6 +12,7 @@
   <Import Project="$(SolutionDir)src\common.nugetversions.props" />
   <ItemGroup>
     <ClCompile Include="UiaTextRangeTests.cpp" />
+    <ClCompile Include="..\..\..\renderer\atlas\ut_atlas\AtlasEngineTests.cpp" />
     <ClCompile Include="..\precomp.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
