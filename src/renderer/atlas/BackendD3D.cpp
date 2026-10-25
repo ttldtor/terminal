@@ -15,6 +15,7 @@
 #include <shader_vs.h>
 
 #include "BuiltinGlyphs.h"
+#include "GlyphCellFit.h"
 #include "dwrite_helpers.h"
 #include "wic.h"
 #include "../../types/inc/ColorFix.hpp"
@@ -1167,6 +1168,14 @@ void BackendD3D::_drawText(RenderingPayload& p)
                     dx = 2;
                 }
 
+                // DirectWrite glyph IDs use 16 bits. Keep fitted and ordinary rasters
+                // distinct without interpreting builtin Unicode scalar IDs as fit flags.
+                if (fontFace && m.fitToCells > 0 && m.fitToCells <= 2 &&
+                    glyphsTo - m.glyphsFrom == 1 && row->glyphOffsets[x].advanceOffset == 0)
+                {
+                    glyphIndex |= static_cast<u32>(m.fitToCells) << GLYPH_CELL_FIT_KEY_SHIFT;
+                }
+
                 auto glyphEntry = glyphs.lookup(glyphIndex);
                 if (!glyphEntry)
                 {
@@ -1333,7 +1342,7 @@ BackendD3D::AtlasGlyphEntry* BackendD3D::_drawGlyph(const RenderingPayload& p, c
     }
 
     const auto glyphIndexU16 = static_cast<u16>(glyphIndex);
-    const DWRITE_GLYPH_RUN glyphRun{
+    DWRITE_GLYPH_RUN glyphRun{
         .fontFace = fontFaceEntry.fontFace.get(),
         .fontEmSize = p.s->font->fontSize,
         .glyphCount = 1,
@@ -1474,16 +1483,19 @@ BackendD3D::AtlasGlyphEntry* BackendD3D::_drawGlyph(const RenderingPayload& p, c
     //
 
     bool isColorGlyph = false;
+    bool colorAntialiasingChanged = false;
     D2D1_RECT_F bounds = GlyphRunEmptyBounds;
 
     const auto antialiasingCleanup = wil::scope_exit([&]() {
-        if (isColorGlyph)
+        if (colorAntialiasingChanged)
         {
             _d2dRenderTarget4->SetTextAntialiasMode(static_cast<D2D1_TEXT_ANTIALIAS_MODE>(p.s->font->antialiasingMode));
         }
     });
 
-    {
+    const auto measureBounds = [&]() {
+        bounds = GlyphRunEmptyBounds;
+        isColorGlyph = false;
         wil::com_ptr<IDWriteColorGlyphRunEnumerator1> enumerator;
 
         if (p.s->font->colorGlyphs)
@@ -1498,6 +1510,7 @@ BackendD3D::AtlasGlyphEntry* BackendD3D::_drawGlyph(const RenderingPayload& p, c
         else
         {
             isColorGlyph = true;
+            colorAntialiasingChanged = true;
             _d2dRenderTarget4->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
             while (ColorGlyphRunMoveNext(enumerator.get()))
@@ -1506,7 +1519,22 @@ BackendD3D::AtlasGlyphEntry* BackendD3D::_drawGlyph(const RenderingPayload& p, c
                 ColorGlyphRunAccumulateBounds(_d2dRenderTarget.get(), colorGlyphRun, bounds);
             }
         }
+    };
+
+    D2D1_POINT_2F fitOffset{};
+    const auto fitToCells = glyphIndex >> GLYPH_CELL_FIT_KEY_SHIFT;
+    if (fitToCells)
+    {
+        // Measure before the line-rendition transform, so one logical cell is
+        // not fitted twice when the completed raster is doubled and split.
+        _d2dRenderTarget->SetTransform(&identityTransform);
+        measureBounds();
+        const auto fit = fitGlyphToCell(bounds, static_cast<f32>(fitToCells * p.s->font->cellSize.x));
+        glyphRun.fontEmSize *= fit.scaleY;
+        fitOffset = { fit.offsetX * transform.m11, fit.offsetY * transform.m22 };
+        _d2dRenderTarget->SetTransform(&transform);
     }
+    measureBounds();
 
     // The bounds may be empty if the glyph is whitespace.
     if (bounds.left >= bounds.right || bounds.top >= bounds.bottom)
@@ -1531,7 +1559,7 @@ BackendD3D::AtlasGlyphEntry* BackendD3D::_drawGlyph(const RenderingPayload& p, c
         static_cast<f32>(rect.y - bt),
     };
 
-    if (scale)
+    if (transform.m11 != 1.0f || transform.m22 != 1.0f)
     {
         transform.dx = (1.0f - transform.m11) * baselineOrigin.x;
         transform.dy = (1.0f - transform.m22) * baselineOrigin.y;
@@ -1564,8 +1592,18 @@ BackendD3D::AtlasGlyphEntry* BackendD3D::_drawGlyph(const RenderingPayload& p, c
     const auto glyphEntry = _drawGlyphAllocateEntry(row, fontFaceEntry, glyphIndex);
     glyphEntry->shadingType = isColorGlyph ? ShadingType::TextPassthrough : _textShadingType;
     glyphEntry->overlapSplit = overlapSplit;
-    glyphEntry->offset.x = bl;
-    glyphEntry->offset.y = bt;
+    glyphEntry->offset.x = fitToCells ? lrintf(bounds.left + fitOffset.x) : bl;
+    if (fitToCells)
+    {
+        const auto allocatedWidth = static_cast<long>(fitToCells) * p.s->font->cellSize.x * (scale ? 2 : 1);
+        if (rect.w <= allocatedWidth)
+        {
+            // Hinting can round the raster a pixel wider than its centered ink bounds.
+            // Place the complete bitmap inside its allocated cells instead of clipping its fringe.
+            glyphEntry->offset.x = std::clamp(static_cast<long>(glyphEntry->offset.x), 0L, allocatedWidth - rect.w);
+        }
+    }
+    glyphEntry->offset.y = fitToCells ? lrintf(bounds.top + fitOffset.y) : bt;
     glyphEntry->size.x = rect.w;
     glyphEntry->size.y = rect.h;
     glyphEntry->texcoord.x = rect.x;

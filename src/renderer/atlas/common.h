@@ -439,6 +439,8 @@ namespace Microsoft::Console::Render::Atlas
         wil::com_ptr<IDWriteFontFace2> fontFace;
         size_t glyphsFrom = 0;
         size_t glyphsTo = 0;
+        // Nonzero only for one isolated keycap glyph; preserves its logical cell advance.
+        u16 fitToCells = 0;
     };
 
     struct GridLineRange

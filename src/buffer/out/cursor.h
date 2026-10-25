@@ -64,6 +64,11 @@ public:
     void ResetDelayEOLWrap() noexcept;
     const std::optional<til::point>& GetDelayEOLWrap() const noexcept;
 
+    /** @brief Remember that output filled the right edge while the cursor was clamped. */
+    void MarkClampedWrite() noexcept;
+    /** @return Whether output reached the right edge since the last cursor operation. */
+    bool WasWriteClamped() const noexcept;
+
     void SetType(const CursorType type) noexcept;
 
 private:
@@ -84,4 +89,5 @@ private:
     bool _isVisible = true;
     bool _isBlinking = true;
     bool _fIsDouble = false; // whether the cursor size should be doubled
+    bool _wasWriteClamped = false;
 };

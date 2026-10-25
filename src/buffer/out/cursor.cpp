@@ -185,6 +185,7 @@ void Cursor::CopyProperties(const Cursor& other) noexcept
     _isVisible = other._isVisible;
     _isBlinking = other._isBlinking;
     _fIsDouble = other._fIsDouble;
+    _wasWriteClamped = other._wasWriteClamped;
 }
 
 void Cursor::DelayEOLWrap() noexcept
@@ -195,6 +196,17 @@ void Cursor::DelayEOLWrap() noexcept
 void Cursor::ResetDelayEOLWrap() noexcept
 {
     _coordDelayedAt.reset();
+    _wasWriteClamped = false;
+}
+
+void Cursor::MarkClampedWrite() noexcept
+{
+    _wasWriteClamped = true;
+}
+
+bool Cursor::WasWriteClamped() const noexcept
+{
+    return _wasWriteClamped;
 }
 
 const std::optional<til::point>& Cursor::GetDelayEOLWrap() const noexcept

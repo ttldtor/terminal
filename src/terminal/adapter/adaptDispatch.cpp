@@ -119,9 +119,26 @@ void AdaptDispatch::_WriteToBuffer(const std::wstring_view string)
         .text = string,
         .columnLimit = lineWidth,
     };
+    std::wstring joinedKeycap;
 
     while (!state.text.empty())
     {
+        if (!wrapAtEOL && cursor.WasWriteClamped() &&
+            (state.text.front() == L'\u20E3' || state.text.front() == L'\uFE0F') &&
+            CodepointWidthDetector::Singleton().GetMode() == TextMeasurementMode::Graphemes)
+        {
+            const auto previous = textBuffer.GetRowByOffset(cursorPosition.y).GetText(cursorPosition.x, cursorPosition.x + 1);
+            if (previous.size() == 1 &&
+                ((previous.front() >= L'0' && previous.front() <= L'9') || previous.front() == L'#' || previous.front() == L'*'))
+            {
+                // The virtual write position is beyond the margin, not before the
+                // final cell. Discard an unfittable late promotion instead of
+                // attaching it to the preceding digit and overwriting this one.
+                state.text.remove_prefix(1);
+                continue;
+            }
+        }
+
         if (const auto delayedCursorPosition = cursor.GetDelayEOLWrap(); delayedCursorPosition && wrapAtEOL)
         {
             cursor.ResetDelayEOLWrap();
@@ -129,6 +146,24 @@ void AdaptDispatch::_WriteToBuffer(const std::wstring_view string)
             // different position from where the EOL was marked.
             if (delayedCursorPosition == cursorPosition)
             {
+                // A keycap prefix can fill the last cell before its combining tail
+                // arrives in another PTY read. Move the whole cluster across the
+                // wrap boundary rather than leaving its base on the previous row.
+                if ((state.text.front() == L'\u20E3' || state.text.front() == L'\uFE0F') &&
+                    CodepointWidthDetector::Singleton().GetMode() == TextMeasurementMode::Graphemes)
+                {
+                    const auto& row = textBuffer.GetRowByOffset(cursorPosition.y);
+                    const auto previous = row.GetText(cursorPosition.x, cursorPosition.x + 1);
+                    if (previous.size() == 1 &&
+                        ((previous.front() >= L'0' && previous.front() <= L'9') || previous.front() == L'#' || previous.front() == L'*'))
+                    {
+                        joinedKeycap = std::wstring{ previous } + std::wstring{ state.text };
+                        RowWriteState clear{ .text = whitespace, .columnBegin = cursorPosition.x, .columnLimit = lineWidth };
+                        textBuffer.Replace(cursorPosition.y, row.GetAttrByColumn(cursorPosition.x), clear);
+                        state.text = joinedKeycap;
+                    }
+                }
+
                 if (_DoLineFeed(page, true, true))
                 {
                     // If the line feed caused the viewport to move down, we
@@ -170,6 +205,11 @@ void AdaptDispatch::_WriteToBuffer(const std::wstring_view string)
 
         if (isWrapping)
         {
+            if (textPositionBefore != textPositionAfter)
+            {
+                cursor.MarkClampedWrite();
+            }
+
             // We want to wrap, but we failed to write even a single character into the row.
             // ROW::Write() returns the lineWidth and leaves stringIterator untouched. To prevent a
             // deadlock, because stringIterator never advances, we need to throw that glyph away.

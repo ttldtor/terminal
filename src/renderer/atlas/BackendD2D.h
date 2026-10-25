@@ -12,6 +12,8 @@ namespace Microsoft::Console::Render::Atlas
 {
     struct BackendD2D : IBackend
     {
+        friend class AtlasEngineTests;
+
         void ReleaseResources() noexcept override;
         void Render(RenderingPayload& payload) override;
         bool RequiresContinuousRedraw() noexcept override;

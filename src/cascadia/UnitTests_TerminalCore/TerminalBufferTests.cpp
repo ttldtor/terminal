@@ -9,6 +9,7 @@
 #include "MockTermSettings.h"
 #include "consoletaeftemplates.hpp"
 #include "../../inc/TestUtils.h"
+#include "../../types/inc/CodepointWidthDetector.hpp"
 
 using namespace winrt::Microsoft::Terminal::Core;
 using namespace Microsoft::Terminal::Core;
@@ -38,6 +39,9 @@ class TerminalCoreUnitTests::TerminalBufferTests final
 
     TEST_METHOD(TestWrappingCharByChar);
     TEST_METHOD(TestWrappingALongString);
+    TEST_METHOD(TestKeycapWrappingAcrossWrites);
+    TEST_METHOD(TestKeycapNoWrapBoundary);
+    TEST_METHOD(TestKeycapWrappingModes);
 
     TEST_METHOD(DontSnapToOutputTest);
 
@@ -133,6 +137,158 @@ void TerminalBufferTests::TestWrappingCharByChar()
     VERIFY_IS_FALSE(row1.WasWrapForced());
 
     TestUtils::VerifyExpectedString(termTb, TestUtils::Test100CharsString, { 0, 0 });
+}
+
+void TerminalBufferTests::TestKeycapWrappingAcrossWrites()
+{
+    auto& detector = CodepointWidthDetector::Singleton();
+    const auto originalMode = detector.GetMode();
+    const auto restoreMode = wil::scope_exit([&]() noexcept { detector.Reset(originalMode); });
+    detector.Reset(TextMeasurementMode::Graphemes);
+
+    for (const auto base : std::wstring_view{ L"0123456789#*" })
+    {
+        for (const bool vs16 : { false, true })
+        {
+            for (const bool streamed : { false, true })
+            {
+                for (const int startRow : { 0, TerminalViewHeight - 1 })
+                {
+                    Terminal candidate{ Terminal::TestDummyMarker{} };
+                    DummyRenderer renderer{ &candidate };
+                    candidate.Create({ TerminalViewWidth, TerminalViewHeight }, TerminalHistoryLength, renderer);
+                    auto& buffer = *candidate._mainBuffer;
+                    auto& machine = *candidate._stateMachine;
+                    auto& cursor = buffer.GetCursor();
+                    cursor.SetPosition({ TerminalViewWidth - 1, startRow });
+
+                    std::wstring keycap(1, base);
+                    if (vs16)
+                    {
+                        keycap += L'\uFE0F';
+                    }
+                    keycap += L'\u20E3';
+
+                    if (streamed)
+                    {
+                        for (const auto ch : keycap)
+                        {
+                            machine.ProcessString({ &ch, 1 });
+                        }
+                    }
+                    else
+                    {
+                        machine.ProcessString(keycap);
+                    }
+                    machine.ProcessString(L"-text");
+
+                    const auto nextRow = startRow + 1;
+                    const auto expected = keycap + L"-text";
+                    VERIFY_ARE_EQUAL(std::wstring_view{ L" " }, buffer.GetRowByOffset(startRow).GetText(79, 80));
+                    VERIFY_ARE_EQUAL(std::wstring_view{ expected }, buffer.GetRowByOffset(nextRow).GetText(0, 7));
+                    VERIFY_ARE_EQUAL(til::point(7, nextRow), cursor.GetPosition());
+                    VERIFY_ARE_EQUAL(DbcsAttribute::Leading, buffer.GetRowByOffset(nextRow).DbcsAttrAt(0));
+                    VERIFY_ARE_EQUAL(DbcsAttribute::Trailing, buffer.GetRowByOffset(nextRow).DbcsAttrAt(1));
+                }
+            }
+        }
+    }
+}
+
+void TerminalBufferTests::TestKeycapNoWrapBoundary()
+{
+    auto& detector = CodepointWidthDetector::Singleton();
+    const auto originalMode = detector.GetMode();
+    const auto restoreMode = wil::scope_exit([&]() noexcept { detector.Reset(originalMode); });
+    detector.Reset(TextMeasurementMode::Graphemes);
+
+    for (const auto base : std::wstring_view{ L"0123456789#*" })
+    {
+        for (const bool vs16 : { false, true })
+        {
+            Terminal candidate{ Terminal::TestDummyMarker{} };
+            DummyRenderer renderer{ &candidate };
+            candidate.Create({ TerminalViewWidth, TerminalViewHeight }, TerminalHistoryLength, renderer);
+            auto& buffer = *candidate._mainBuffer;
+            auto& machine = *candidate._stateMachine;
+            machine.ProcessString(L"\x1b[?7l\x1b[1;79H");
+            const std::wstring expected = L"1" + std::wstring(1, base);
+            machine.ProcessString(expected);
+            if (vs16)
+            {
+                machine.ProcessString(L"\uFE0F");
+            }
+            machine.ProcessString(L"\u20E3");
+            // No two-column promotion fits here with wrapping off. Preserve
+            // the base and its neighbour instead of making the wrong keycap.
+            VERIFY_ARE_EQUAL(std::wstring_view{ expected }, buffer.GetRowByOffset(0).GetText(78, 80));
+            VERIFY_ARE_EQUAL(til::point(79, 0), buffer.GetCursor().GetPosition());
+            VERIFY_IS_TRUE(buffer.GetCursor().WasWriteClamped());
+
+            machine.ProcessString(L"\x1b[1;80H");
+            VERIFY_IS_FALSE(buffer.GetCursor().WasWriteClamped());
+            machine.ProcessString(L"X");
+            VERIFY_ARE_EQUAL(std::wstring_view{ L"1X" }, buffer.GetRowByOffset(0).GetText(78, 80));
+        }
+    }
+}
+
+void TerminalBufferTests::TestKeycapWrappingModes()
+{
+    auto& detector = CodepointWidthDetector::Singleton();
+    const auto originalMode = detector.GetMode();
+    const auto restoreMode = wil::scope_exit([&]() noexcept { detector.Reset(originalMode); });
+    detector.Reset(TextMeasurementMode::Graphemes);
+
+    struct Test
+    {
+        std::wstring_view setup;
+        int lastColumn;
+        int nextColumn;
+        bool existingDestination = false;
+    };
+    const std::array tests{
+        Test{ L"\x1b[4h", 79, 0, true }, // Insert mode, preserving destination text.
+        Test{ L"\x1b#6", 39, 0 }, // Double-width source line.
+        Test{ L"\x1b[?69h\x1b[10;20s", 19, 9 }, // Horizontal margins.
+    };
+    for (const auto& test : tests)
+    {
+        Terminal candidate{ Terminal::TestDummyMarker{} };
+        DummyRenderer renderer{ &candidate };
+        candidate.Create({ TerminalViewWidth, TerminalViewHeight }, 0, renderer);
+        auto& buffer = *candidate._mainBuffer;
+        auto& machine = *candidate._stateMachine;
+        machine.ProcessString(test.setup);
+        if (test.existingDestination)
+        {
+            buffer.GetCursor().SetPosition({ 0, 1 });
+            machine.ProcessString(L"ZZZZZ");
+        }
+        buffer.GetCursor().SetPosition({ test.lastColumn, 0 });
+        machine.ProcessString(L"0");
+        machine.ProcessString(L"\u20E3X");
+        VERIFY_ARE_EQUAL(std::wstring_view{ L" " }, buffer.GetRowByOffset(0).GetText(test.lastColumn, test.lastColumn + 1));
+        VERIFY_ARE_EQUAL(std::wstring_view{ L"0\u20E3X" }, buffer.GetRowByOffset(1).GetText(test.nextColumn, test.nextColumn + 3));
+        VERIFY_ARE_EQUAL(til::point(test.nextColumn + 3, 1), buffer.GetCursor().GetPosition());
+        if (test.existingDestination)
+        {
+            VERIFY_ARE_EQUAL(std::wstring_view{ L"ZZZZZ" }, buffer.GetRowByOffset(1).GetText(3, 8));
+        }
+    }
+
+    // The core clamps a viewport to at least two physical cells, but DEC
+    // double-width lines can still leave only one logical cell available.
+    Terminal narrow{ Terminal::TestDummyMarker{} };
+    DummyRenderer renderer{ &narrow };
+    narrow.Create({ 2, 3 }, 0, renderer);
+    narrow._stateMachine->ProcessString(L"\x1b#6\x1b[2;1H\x1b#6\x1b[1;1H");
+    VERIFY_ARE_EQUAL(1, narrow._mainBuffer->GetLineWidth(1));
+    narrow._stateMachine->ProcessString(L"0");
+    narrow._stateMachine->ProcessString(L"\u20E3X");
+    // Dropping an unfittable glyph also marks delayed wrap; the next printable
+    // character therefore advances to the following normal-width line.
+    VERIFY_ARE_EQUAL(std::wstring_view{ L"X" }, narrow._mainBuffer->GetRowByOffset(2).GetText(0, 1));
 }
 
 void TerminalBufferTests::TestWrappingALongString()

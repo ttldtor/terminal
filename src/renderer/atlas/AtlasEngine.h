@@ -79,6 +79,8 @@ namespace Microsoft::Console::Render::Atlas
         [[nodiscard]] HRESULT UpdateFont(const FontInfoDesired& pfiFontInfoDesired, FontInfo& fiFontInfo, const std::unordered_map<std::wstring_view, float>& features, const std::unordered_map<std::wstring_view, float>& axes) noexcept;
 
     private:
+        friend class AtlasEngineTests;
+
         // AtlasEngine.cpp
         ATLAS_ATTR_COLD void _handleSettingsUpdate();
         void _recreateFontDependentResources();
@@ -86,7 +88,8 @@ namespace Microsoft::Console::Render::Atlas
         void _flushBufferLine();
         void _mapRegularText(size_t offBeg, size_t offEnd);
         void _mapBuiltinGlyphs(size_t offBeg, size_t offEnd);
-        void _mapCharacters(const wchar_t* text, u32 textLength, u32* mappedLength, IDWriteFontFace2** mappedFontFace) const;
+        void _mapCharacters(const wchar_t* text, u32 textLength, u32* mappedLength, IDWriteFontFace2** mappedFontFace, const wchar_t* baseFamilyName = nullptr) const;
+        void _mapCharactersForGrapheme(u32 idx, u32 end, u32* mappedLength, IDWriteFontFace2** mappedFontFace) const;
         void _mapComplex(IDWriteFontFace2* mappedFontFace, u32 idx, u32 length, ShapedRow& row);
         ATLAS_ATTR_COLD void _mapReplacementCharacter(u32 from, u32 to, ShapedRow& row);
         void _fillColorBitmap(const size_t y, const size_t x1, const size_t x2, const u32 fgColor, const u32 bgColor, const u32 ulColor) noexcept;

@@ -3,6 +3,7 @@
 
 #include "pch.h"
 #include "BackendD2D.h"
+#include "GlyphCellFit.h"
 
 #include <til/unicode.h>
 
@@ -254,7 +255,7 @@ void BackendD2D::_drawText(RenderingPayload& p)
 
                 const auto count = it - beg;
                 const auto brush = _brushWithColor(fg);
-                const DWRITE_GLYPH_RUN glyphRun{
+                DWRITE_GLYPH_RUN glyphRun{
                     .fontFace = m.fontFace.get(),
                     .fontEmSize = p.s->font->fontSize,
                     .glyphCount = gsl::narrow_cast<UINT32>(count),
@@ -262,10 +263,58 @@ void BackendD2D::_drawText(RenderingPayload& p)
                     .glyphAdvances = &row->glyphAdvances[off],
                     .glyphOffsets = &row->glyphOffsets[off],
                 };
-                const D2D1_POINT_2F baselineOrigin{
+                D2D1_POINT_2F baselineOrigin{
                     baselineX,
                     baselineY,
                 };
+
+                if (m.fitToCells > 0 && m.fitToCells <= 2 && count == 1 &&
+                    row->glyphOffsets[off].advanceOffset == 0)
+                {
+                    // Fitting uses baseline-local ink without placement offsets.
+                    // Restore the enclosing transform before composing the draw fit.
+                    GlyphCellFit fit;
+                    {
+                        D2D1_MATRIX_3X2_F savedTransform;
+                        _renderTarget->GetTransform(&savedTransform);
+                        const auto restoreTransform = wil::scope_exit([&]() noexcept {
+                            _renderTarget->SetTransform(&savedTransform);
+                        });
+                        _renderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
+
+                        auto rawRun = glyphRun;
+                        rawRun.glyphAdvances = nullptr;
+                        rawRun.glyphOffsets = nullptr;
+                        D2D1_RECT_F rawBounds = GlyphRunEmptyBounds;
+                        wil::com_ptr<IDWriteColorGlyphRunEnumerator1> rawEnumerator;
+                        if (p.s->font->colorGlyphs)
+                        {
+                            rawEnumerator = TranslateColorGlyphRun(p.dwriteFactory4.get(), {}, &rawRun);
+                        }
+                        if (rawEnumerator)
+                        {
+                            while (ColorGlyphRunMoveNext(rawEnumerator.get()))
+                            {
+                                ColorGlyphRunAccumulateBounds(_renderTarget.get(), ColorGlyphRunGetCurrentRun(rawEnumerator.get()), rawBounds);
+                            }
+                        }
+                        else
+                        {
+                            GlyphRunAccumulateBounds(_renderTarget.get(), {}, &rawRun, rawBounds);
+                        }
+                        fit = fitGlyphToCell(rawBounds, static_cast<f32>(m.fitToCells * p.s->font->cellSize.x));
+                    }
+
+                    glyphRun.fontEmSize *= fit.scaleY;
+                    baselineOrigin.x += fit.offsetX;
+                    baselineOrigin.y += fit.offsetY;
+                    if (m.fitToCells == 1)
+                    {
+                        // ClearType hinting at a fractional baseline can move a fringe
+                        // into the next column. Keep this narrow glyph on the pixel grid.
+                        baselineOrigin.x = std::floor(baselineOrigin.x);
+                    }
+                }
 
                 D2D1_RECT_F bounds = GlyphRunEmptyBounds;
                 wil::com_ptr<IDWriteColorGlyphRunEnumerator1> enumerator;

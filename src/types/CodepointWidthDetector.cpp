@@ -810,6 +810,7 @@ bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::wstring_
     auto width = s.width;
     auto state = s._state;
     auto lead = s._last;
+    auto previousCodepoint = s._previousCodepoint;
 
     // If it's a new string argument, we'll restart at the new string's beginning.
     clusterBeg = resetIfOutOfRange(beg, end, beg, clusterBeg);
@@ -837,6 +838,7 @@ bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::wstring_
         lead = ucdLookup(cp);
         width = 0;
         state = 0;
+        previousCodepoint = 0;
 
         for (;;)
         {
@@ -850,13 +852,16 @@ bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::wstring_
                 // U+FE0F Variation Selector-16 is used to turn unqualified Emojis into qualified ones.
                 // By convention, this turns them from being ambiguous width (= narrow) into wide ones.
                 // We achieve this here by explicitly giving this codepoint a wide width.
+                // Unqualified keycaps also need two cells once their enclosing mark arrives.
                 // Later down below we'll clamp width back to <= 2.
-                if (cp == 0xFE0F)
+                const auto keycapBase = (previousCodepoint >= U'0' && previousCodepoint <= U'9') || previousCodepoint == U'#' || previousCodepoint == U'*';
+                if (cp == 0xFE0F || (cp == 0x20E3 && keycapBase))
                 {
                     w = 2;
                 }
 
                 width += w;
+                previousCodepoint = cp;
             }
 
             // If we're at the end of the string, we'll break out of the loop, but leave
@@ -891,6 +896,7 @@ bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::wstring_
         s.width = width;
         s._state = state;
         s._last = lead;
+        s._previousCodepoint = previousCodepoint;
     }
 
     return clusterEnd < end;
@@ -907,6 +913,7 @@ bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::wstring_
     auto width = s.width;
     auto state = s._state;
     auto trail = s._last;
+    auto previousCodepoint = s._previousCodepoint;
 
     // If it's a new string argument, we'll restart at the new string's beginning.
     clusterEnd = resetIfOutOfRange(beg, end, end, clusterEnd);
@@ -934,6 +941,7 @@ bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::wstring_
         trail = ucdLookup(cp);
         width = 0;
         state = 0;
+        previousCodepoint = 0;
 
         for (;;)
         {
@@ -947,13 +955,16 @@ bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::wstring_
                 // U+FE0F Variation Selector-16 is used to turn unqualified Emojis into qualified ones.
                 // By convention, this turns them from being ambiguous width (= narrow) into wide ones.
                 // We achieve this here by explicitly giving this codepoint a wide width.
+                // Match the forward keycap rule while visiting its base after the mark.
                 // Later down below we'll clamp width back to <= 2.
-                if (cp == 0xFE0F)
+                const auto keycapBase = (cp >= U'0' && cp <= U'9') || cp == U'#' || cp == U'*';
+                if (cp == 0xFE0F || (previousCodepoint == 0x20E3 && keycapBase))
                 {
                     w = 2;
                 }
 
                 width += w;
+                previousCodepoint = cp;
             }
 
             // If we're at the end of the string, we'll break out of the loop, but leave
@@ -988,6 +999,7 @@ bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::wstring_
         s.width = width;
         s._state = state;
         s._last = trail;
+        s._previousCodepoint = previousCodepoint;
     }
 
     return clusterBeg > beg;
